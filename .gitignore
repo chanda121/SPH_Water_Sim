@@ -1,0 +1,23 @@
+# virtual envs
+pysph_env/
+
+# editors/IDE
+.vs/
+.vscode/
+.idea/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# builds / packaging
+dist/
+.dist/
+build/
+
+# PySPH outputs
+*_output/
+
+# OS noise
+.DS_Store
