@@ -2,11 +2,20 @@ import sys, os, numpy as np, matplotlib.pyplot as plt
 from itertools import cycle
 from pysph.solver.utils import get_files, load
 
-outdir = sys.argv[1] if len(sys.argv) > 1 else "elliptical_drop_output"
+outdir = sys.argv[1] if len(sys.argv) > 1 else "2D_Water_Sim_output"
 files = get_files(outdir)
 
 if not files:
     raise SystemExit(f"No output files in {outdir}")
+
+x0,y0 = load(files[0])['arrays']['fluid'].get('x','y', only_real_particles=True)
+
+for i,f in enumerate(files[1:], 2):
+    pa = load(f)['arrays']['fluid']
+    x,y = pa.get('x','y', only_real_particles=True)
+    disp = np.hypot(x - x0, y - y0)
+    print(i, "max|Δx,y|=", float(disp.max()), " mean|Δ|=", float(disp.mean()))
+    x0, y0 = x, y
 
 times = []
 for fp in files:
@@ -37,13 +46,17 @@ for fpath in files:
     vmin = min(vmin, float(H.min()))
     vmax = max(vmax, float(H.max()))
 
-padx = 0.02*(xmax - xmin or 1.0)
-pady = 0.02*(ymax - ymin or 1.0)
+padx = 0.2*(xmax - xmin or 1.0)
+pady = 0.2*(ymax - ymin or 1.0)
 
 # Init Plot
 d0 = load(files[0]); 
 pa0 = d0["arrays"]["fluid"]
+float(pa0.u.max()), float(pa0.v.max())
 H0 = pa0.height if hasattr(pa0, "height") else pa0.rho
+
+
+# Looking at the data:
 
 
 plt.ion()
