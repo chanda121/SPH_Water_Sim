@@ -62,7 +62,7 @@ class swe_sim(Application):
 
         #Setup properties
         # add required "previous state" properties
-        for prop in ('rho0','u0','v0','w0','x0','y0','z0', 'arho', 'ax', 'ay', 'az'):
+        for prop in ('rho0','u0','v0','w0','x0','y0','z0', 'arho', 'au', 'av', 'aw'):
             pa.add_property(prop)
 
 
@@ -76,7 +76,7 @@ class swe_sim(Application):
         pa.z0[:]   = 0.0            # 2D
         # initialize to zeros
         pa.arho[:] = 0.0
-        pa.ax[:] = 0.0; pa.ay[:] = 0.0; pa.az[:] = 0.0
+        pa.au[:] = 0.0; pa.av[:] = 0.0; pa.aw[:] = 0.0
 
         print(f"Number of particles :: {pa.get_number_of_particles()}")
 
