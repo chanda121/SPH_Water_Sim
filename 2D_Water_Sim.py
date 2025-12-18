@@ -1,112 +1,207 @@
-#Supporting
 import os
 from numpy import mgrid, sqrt, ones_like
 import numpy as np
 from pysph.base.utils import get_particle_array
-#Main application
 from pysph.solver.application import Application
-
-#Create equations
 from pysph.sph.equation import Group
-from pysph.sph.basic_equations import SummationDensity, XSPHCorrection
-from CustomEquations.custom_swe_equations import SWEPressureFromRho, SWEViscosity
-
-#Solvers/Integrators
+from pysph.sph.basic_equations import SummationDensity
+from CustomEquations.custom_swe_equations import (
+    SWEPressureFromRho, SWEViscosity, SWEStep, BoundaryForce, BoundaryStep
+)
 from pysph.solver.solver import Solver
 from pysph.sph.integrator import EPECIntegrator
-from pysph.sph.integrator_step import WCSPHStep
-
 from pysph.base.kernels import CubicSpline
 
-"""
-TODOS:
-* Create custom equation to calculate the momentum (Forces acting on a particle being)
-    * F_pressure_i = -g del(h_i) = -g*summ(V_j*del(kernel))
-    * F_viscous_i = dynamic_visc * summ(V_j*(u_j - u_i) / h_j)*grad(kernel)
-    * g -> gravity, V_j is volume (constant), h is height (/rho)
 
-* 
-"""
-
-#Subclassing from Application
 class swe_sim(Application):
     def initialize(self):
-        self.dx = 0.02
-        self.hdx = 1.3
-        self.ro = 1.0
+        # Particle spacing - larger = fewer particles, larger physical scale
+        self.dx = 0.05
+        self.hdx = 2.0     # Smoothing length ratio (standard SPH value)
+        self.ro = 1.0       # Reference density (= reference height)
+        self.radius = 1.0   # Radius of initial fluid circle
+        
+        # Domain bounds for boundary particles
+        self.domain_size = 5.0  # Half-width of domain (domain goes from -5 to +5)
 
     def create_particles(self):
         dx = self.dx
         hdx = self.hdx
         ro = self.ro
-        name = 'fluid'
-
-        x, y = mgrid[-1.05:1.05+1e-4:dx, -1.05:1.05+1e-4:dx]
-        x = x.ravel() #flatten arrays
-        y = y.ravel()
-
-        m = ones_like(x)*dx*dx*ro #particle mass array
-        h = ones_like(x)*hdx*dx #smoothing radius of particles
-        rho = ones_like(x) * ro #initial density of particles
-        u = -100*x
-        v = 100*y
-
-        # remove particles outside the circle
-        indices = []
-        for i in range(len(x)):
-            if sqrt(x[i]*x[i] + y[i]*y[i]) - 1 > 1e-10:
-                indices.append(i)
-        pa = get_particle_array(x=x, y=y, m=m, rho=rho, h=h, u=u, v=v,
-                                name=name)
-        pa.remove_particles(indices)
-
-        #Setup properties
-        # add required "previous state" properties
-        for prop in ('rho0','u0','v0','w0','x0','y0','z0', 'arho', 'au', 'av', 'aw'):
-            pa.add_property(prop)
-
-
-        # initialize them to current values
-        pa.rho0[:] = pa.rho
-        pa.u0[:]   = pa.u
-        pa.v0[:]   = pa.v
-        pa.w0[:]   = 0.0            # 2D
-        pa.x0[:]   = pa.x
-        pa.y0[:]   = pa.y
-        pa.z0[:]   = 0.0            # 2D
-        # initialize to zeros
-        pa.arho[:] = 0.0
-        pa.au[:] = 0.0; pa.av[:] = 0.0; pa.aw[:] = 0.0
-
-        print(f"Number of particles :: {pa.get_number_of_particles()}")
-
-        return [pa]
+        R = self.radius
         
+        # Create initial fluid particles
+        list_of_centers = [(1,1,1), (-1,-1,1)]
+        x, y = self.create_circular_patches(dx, list_of_centers)
+        
+        # Particle properties
+        m = ones_like(x) * dx * dx * ro   # mass = area * density
+        h = ones_like(x) * hdx * dx       # smoothing length
+        rho = ones_like(x) * ro           # initial density/height
+        
+        # Initial velocity - start at rest
+        u = np.zeros_like(x)
+        v = np.zeros_like(x)
+ 
+        # Create fluid particle array
+        fluid = get_particle_array(
+            x=x, y=y, m=m, rho=rho, h=h, u=u, v=v,
+            name='fluid'
+        )
+
+        # Add required properties for the integrator
+        for prop in ('rho0', 'u0', 'v0', 'x0', 'y0', 'au', 'av'):
+            fluid.add_property(prop)
+        
+        # Add properties for boundary force (tracking closest boundary)
+        for prop in ('closest_dist', 'closest_nx', 'closest_ny'):
+            fluid.add_property(prop)
+
+        # Initialize fluid properties
+        fluid.rho0[:] = fluid.rho
+        fluid.u0[:] = fluid.u
+        fluid.v0[:] = fluid.v
+        fluid.x0[:] = fluid.x
+        fluid.y0[:] = fluid.y
+        fluid.au[:] = 0.0
+        fluid.av[:] = 0.0
+        fluid.closest_dist[:] = 1e10
+        fluid.closest_nx[:] = 0.0
+        fluid.closest_ny[:] = 0.0
+
+        # Create boundary particles
+        bx, by = self.create_boundary_particles(dx, self.domain_size)
+        
+        boundary = get_particle_array(
+            x=bx, y=by,
+            m=ones_like(bx) * dx * dx * ro,
+            rho=ones_like(bx) * ro,
+            h=ones_like(bx) * hdx * dx,
+            u=np.zeros_like(bx),
+            v=np.zeros_like(bx),
+            name='boundary'
+        )
+
+        print(f"Number of fluid particles: {fluid.get_number_of_particles()}")
+        print(f"Number of boundary particles: {boundary.get_number_of_particles()}")
+        print(f"Particle spacing dx = {dx}")
+        print(f"Smoothing length h = {hdx * dx:.4f}")
+        print(f"Domain size: [{-self.domain_size}, {self.domain_size}]")
+
+        return [fluid, boundary]
+   
+    def create_circular_patches(self, dx, list_of_centers):
+        """
+        dx - particle distance
+        list_of_centers = [(x1, y1, r1), ...]
+        """
+        xmin = min(c[0] - c[2] for c in list_of_centers) - dx 
+        xmax = max(c[0] + c[2] for c in list_of_centers) + dx
+        ymin = min(c[1] - c[2] for c in list_of_centers) - dx
+        ymax = max(c[1] + c[2] for c in list_of_centers) + dx
+
+        #Get initial bounding box
+        x, y = mgrid[xmin:xmax:dx, ymin:ymax:dx]
+        x, y = x.ravel(), y.ravel()
+
+        #Create masks
+        mask = np.zeros(len(x), dtype=bool)
+        for cx, cy, r in list_of_centers:
+            mask |= ((x-cx)**2 + (y-cy)**2) <= r**2 #do an OR to add all values inside circles to mask as true
+            
+        return x[mask], y[mask]
+
+    def create_boundary_particles(self, dx, half_width):
+        """
+        Create boundary particles around a square domain.
+        
+        Creates multiple layers of particles along each wall for 
+        better repulsion (paper Eq. 17-18).
+        """
+        # Number of layers of boundary particles
+        n_layers = 3
+        
+        # Particles along each edge
+        edge = np.arange(-half_width, half_width + dx, dx)
+        
+        x_list = []
+        y_list = []
+        
+        for layer in range(n_layers):
+            offset = layer * dx
+            
+            # Bottom wall (y = -half_width - offset)
+            x_list.append(edge)
+            y_list.append(np.full_like(edge, -half_width - offset))
+            
+            # Top wall (y = +half_width + offset)
+            x_list.append(edge)
+            y_list.append(np.full_like(edge, half_width + offset))
+            
+            # Left wall (x = -half_width - offset), excluding corners
+            inner_edge = edge[1:-1]  # exclude corners to avoid duplicates
+            x_list.append(np.full_like(inner_edge, -half_width - offset))
+            y_list.append(inner_edge)
+            
+            # Right wall (x = +half_width + offset), excluding corners
+            x_list.append(np.full_like(inner_edge, half_width + offset))
+            y_list.append(inner_edge)
+        
+        x = np.concatenate(x_list)
+        y = np.concatenate(y_list)
+        
+        return x, y
+
     def create_scheme(self):
-        return None #Create custom scheme
-    
+        return None
+
     def create_solver(self):
-        kernel = CubicSpline(dim=2) #2D particles
+        kernel = CubicSpline(dim=2)
         
-        integrator = EPECIntegrator(fluid=WCSPHStep())
-        dt = 0.25 * self.hdx * self.dx / 100.0
-        tf = 0.5
-        return Solver(kernel=kernel, dim=2, integrator=integrator, dt=dt, tf=tf)
+        # Integrator for fluid and static boundary
+        integrator = EPECIntegrator(
+            fluid=SWEStep(),
+            boundary=BoundaryStep()
+        )
+        
+        # Time stepping
+        # CFL: dt < h / c, where c = sqrt(g*H) ≈ 3 for g=10, H=1
+        c0 = 5.0  # characteristic wave speed
+        dt = 0.2 * self.hdx * self.dx / c0
+        tf = 5.0   
+        pfreq = 15  # output every 15 steps
+        
+        print(f"Time step dt = {dt:.6f}")
+        print(f"Final time tf = {tf}")
+        
+        return Solver(
+            kernel=kernel, dim=2, integrator=integrator,
+            dt=dt, tf=tf, pfreq=pfreq
+        )
 
     def create_equations(self):
+        # Boundary influence distance (paper Eq. 18: b parameter)
+        # Should be ~2-3x particle spacing to ensure smooth repulsion
+        b = 3.0 * self.dx
+        
         return [
-            # Updating rho (pseudo height)
+            # Step 1: Compute height (rho) from particle distribution
             Group([
                 SummationDensity(dest='fluid', sources=['fluid']),
             ]),
-            # Updating accelerations
+            # Step 2: Compute accelerations from pressure and viscosity
             Group([
-                SWEPressureFromRho(dest='fluid', sources=['fluid'], g=9.81),
-                SWEViscosity(dest='fluid', sources=['fluid'], nu=1e-3),  # tune ν
+                SWEPressureFromRho(dest='fluid', sources=['fluid'], g=9.8, dx=self.dx),
+                SWEViscosity(dest='fluid', sources=['fluid'], nu=0.1, dx=self.dx),
+            ]),
+            # Step 3: Boundary repulsion force (paper Eq. 17-18)
+            Group([
+                BoundaryForce(dest='fluid', sources=['boundary'], b=b, c=0.15),
             ])
         ]
-    
+
     def _compute_results(self):
+        """Compute and save simulation results to .npz file."""
         from pysph.solver.utils import iter_output
         from collections import defaultdict
         data = defaultdict(list)
@@ -114,7 +209,7 @@ class swe_sim(Application):
         for sd, array in iter_output(self.output_files, 'fluid'):
             t = sd['t']
             m, u, v, rho, x, y = array.get('m', 'u', 'v', 'rho', 'x', 'y')
-            ke = 0.5 * np.sum(m * (u*u + v*v)) #KE
+            ke = 0.5 * np.sum(m * (u*u + v*v))  # Kinetic energy
 
             # Geometry
             x_min, x_max = x.min(), x.max()
@@ -127,7 +222,7 @@ class swe_sim(Application):
             data['t'].append(t)
             data['ke'].append(ke)
             data['H_min'].append(rho.min())
-            data['H-max'].append(rho.max())
+            data['H_max'].append(rho.max())
             data['mass'].append(m.sum())
             data['x_min'].append(x_min); data['x_max'].append(x_max)
             data['y_min'].append(y_min); data['y_max'].append(y_max)
@@ -146,10 +241,8 @@ class swe_sim(Application):
             return
         self._compute_results()
 
-        
-        
+
 if __name__ == '__main__':
     app = swe_sim()
     app.run()
     app.post_process(app.info_filename)
-    
