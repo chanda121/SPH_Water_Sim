@@ -22,7 +22,7 @@ class swe_sim(Application):
         self.radius = 1.0   # Radius of initial fluid circle
         
         # Domain bounds for boundary particles
-        self.domain_size = 5.0  # Half-width of domain (domain goes from -5 to +5)
+        self.domain_size = 2.0  # Half-width of domain 
 
     def create_particles(self):
         dx = self.dx
@@ -52,10 +52,6 @@ class swe_sim(Application):
         # Add required properties for the integrator
         for prop in ('rho0', 'u0', 'v0', 'x0', 'y0', 'au', 'av'):
             fluid.add_property(prop)
-        
-        # Add properties for boundary force (tracking closest boundary)
-        for prop in ('closest_dist', 'closest_nx', 'closest_ny'):
-            fluid.add_property(prop)
 
         # Initialize fluid properties
         fluid.rho0[:] = fluid.rho
@@ -65,12 +61,9 @@ class swe_sim(Application):
         fluid.y0[:] = fluid.y
         fluid.au[:] = 0.0
         fluid.av[:] = 0.0
-        fluid.closest_dist[:] = 1e10
-        fluid.closest_nx[:] = 0.0
-        fluid.closest_ny[:] = 0.0
 
-        # Create boundary particles
-        bx, by = self.create_boundary_particles(dx, self.domain_size)
+        # Create boundary particles with normals
+        bx, by, bnx, bny = self.create_boundary_particles(dx, self.domain_size)
         
         boundary = get_particle_array(
             x=bx, y=by,
@@ -81,6 +74,12 @@ class swe_sim(Application):
             v=np.zeros_like(bx),
             name='boundary'
         )
+        
+        # Add normals to boundary particles
+        boundary.add_property('nx')
+        boundary.add_property('ny')
+        boundary.nx[:] = bnx
+        boundary.ny[:] = bny
 
         print(f"Number of fluid particles: {fluid.get_number_of_particles()}")
         print(f"Number of boundary particles: {boundary.get_number_of_particles()}")
@@ -113,44 +112,53 @@ class swe_sim(Application):
 
     def create_boundary_particles(self, dx, half_width):
         """
-        Create boundary particles around a square domain.
+        Create boundary particles around a square domain with normals.
+        Returns x, y, nx, ny arrays.
         
-        Creates multiple layers of particles along each wall for 
-        better repulsion (paper Eq. 17-18).
+        Normals point INTO the fluid (away from wall).
         """
-        # Number of layers of boundary particles
         n_layers = 3
-        
-        # Particles along each edge
         edge = np.arange(-half_width, half_width + dx, dx)
+        inner_edge = edge[1:-1]  # exclude corners
         
         x_list = []
         y_list = []
+        nx_list = []
+        ny_list = []
         
         for layer in range(n_layers):
             offset = layer * dx
             
-            # Bottom wall (y = -half_width - offset)
+            # Bottom wall: normal points up (0, 1)
             x_list.append(edge)
             y_list.append(np.full_like(edge, -half_width - offset))
+            nx_list.append(np.zeros_like(edge))
+            ny_list.append(np.ones_like(edge))
             
-            # Top wall (y = +half_width + offset)
+            # Top wall: normal points down (0, -1)
             x_list.append(edge)
             y_list.append(np.full_like(edge, half_width + offset))
+            nx_list.append(np.zeros_like(edge))
+            ny_list.append(np.full_like(edge, -1.0))
             
-            # Left wall (x = -half_width - offset), excluding corners
-            inner_edge = edge[1:-1]  # exclude corners to avoid duplicates
+            # Left wall: normal points right (1, 0)
             x_list.append(np.full_like(inner_edge, -half_width - offset))
             y_list.append(inner_edge)
+            nx_list.append(np.ones_like(inner_edge))
+            ny_list.append(np.zeros_like(inner_edge))
             
-            # Right wall (x = +half_width + offset), excluding corners
+            # Right wall: normal points left (-1, 0)
             x_list.append(np.full_like(inner_edge, half_width + offset))
             y_list.append(inner_edge)
+            nx_list.append(np.full_like(inner_edge, -1.0))
+            ny_list.append(np.zeros_like(inner_edge))
         
         x = np.concatenate(x_list)
         y = np.concatenate(y_list)
+        nx = np.concatenate(nx_list)
+        ny = np.concatenate(ny_list)
         
-        return x, y
+        return x, y, nx, ny
 
     def create_scheme(self):
         return None
@@ -159,8 +167,10 @@ class swe_sim(Application):
         kernel = CubicSpline(dim=2)
         
         # Integrator for fluid and static boundary
+        # Pass domain bounds to integrator for hard clamping
+        ds = self.domain_size
         integrator = EPECIntegrator(
-            fluid=SWEStep(),
+            fluid=SWEStep(xmin=-ds, xmax=ds, ymin=-ds, ymax=ds, margin=self.dx),
             boundary=BoundaryStep()
         )
         
@@ -180,9 +190,9 @@ class swe_sim(Application):
         )
 
     def create_equations(self):
-        # Boundary influence distance (paper Eq. 18: b parameter)
-        # Should be ~2-3x particle spacing to ensure smooth repulsion
-        b = 3.0 * self.dx
+        # Boundary influence distance - should be large enough to catch fast particles
+        # Using smoothing length scale (hdx * dx) is a good choice
+        b = self.hdx * self.dx * 2.0  # 2x smoothing length
         
         return [
             # Step 1: Compute height (rho) from particle distribution
@@ -194,9 +204,12 @@ class swe_sim(Application):
                 SWEPressureFromRho(dest='fluid', sources=['fluid'], g=9.8, dx=self.dx),
                 SWEViscosity(dest='fluid', sources=['fluid'], nu=0.1, dx=self.dx),
             ]),
-            # Step 3: Boundary repulsion force (paper Eq. 17-18)
+            # Step 3: Boundary repulsion force
+            # - repulsion_coeff: strength of distance-based push-away
+            # - damping: velocity damping for particles moving toward wall
+            # - c: force reflection intensity
             Group([
-                BoundaryForce(dest='fluid', sources=['boundary'], b=b, c=0.15),
+                BoundaryForce(dest='fluid', sources=['boundary'], b=b, c=0.5),
             ])
         ]
 

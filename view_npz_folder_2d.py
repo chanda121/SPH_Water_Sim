@@ -62,7 +62,7 @@ t0 = float(d0["solver_data"]["t"])
 
 plt.ion()
 fig, ax = plt.subplots(figsize=(8, 8))
-sc = ax.scatter(pa0.x, pa0.y, s=30, c=H0, marker='s', cmap='viridis')  # s=size in points²
+sc = ax.scatter(pa0.x, pa0.y, s=75, c=H0, marker='s', cmap='viridis')  # s=size in points²
 plt.colorbar(sc, ax=ax, label="Height (rho)")
 ax.set_aspect("equal")
 ax.set_xlim(xmin - padx, xmax + padx)
