@@ -1,5 +1,5 @@
 import os
-from numpy import mgrid, sqrt, ones_like
+from numpy import mgrid, ones_like
 import numpy as np
 from pysph.base.utils import get_particle_array
 from pysph.solver.application import Application
